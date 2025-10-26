@@ -110,7 +110,7 @@ log INFO "Lighttpd version:" && lighttpd -v
 log INFO "Starting lighttpd on port $WEBDAV_PORT"
 lighttpd -D -f "$LIGHTTPD_CONFIG" 2>&1 | tee -a /var/log/lighttpd.log &
 PID_LIGHTTPD=$!
-sleep 5
+sleep 1
 kill -0 "$PID_LIGHTTPD" 2>/dev/null || { log ERROR "Failed to start lighttpd"; cat /var/log/lighttpd.log >&2; cat "$LIGHTTPD_CONFIG" >&2; ls -ld "$DEC_PATH" >&2; ls /usr/lib/lighttpd >&2; lighttpd -v >&2; exit 1; }
 log SUCCESS "lighttpd started (PID: $PID_LIGHTTPD)"
 
