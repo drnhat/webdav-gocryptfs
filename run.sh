@@ -12,8 +12,9 @@ check() {
     log ERROR "$1"
     [ -f /var/log/lighttpd.log ] && log ERROR "lighttpd log:" && cat /var/log/lighttpd.log >&2
     [ -f "$LIGHTTPD_CONFIG" ] && log ERROR "lighttpd config:" && cat "$LIGHTTPD_CONFIG" >&2
-    [ -f /tmp/webdav.passwd ] && log ERROR "webdav passwd:" && cat /tmp/webdav.passwd >&2
     log ERROR "Directory permissions:" && ls -ld "$DEC_PATH" >&2
+    log ERROR "Lighttpd modules:" && ls /usr/lib/lighttpd >&2
+    log ERROR "Lighttpd version:" && lighttpd -v >&2
     exit 1
   }
 }
@@ -25,7 +26,7 @@ cleanup() {
   [ -n "$PID_FUSE" ] && kill -0 "$PID_FUSE" 2>/dev/null && { log INFO "Stopping gocryptfs (PID: $PID_FUSE)"; kill "$PID_FUSE" || log ERROR "Failed to kill gocryptfs"; }
   mountpoint -q "$DEC_PATH" && { log INFO "Unmounting $DEC_PATH"; fusermount -u "$DEC_PATH" 2>/dev/null || umount "$DEC_PATH" 2>/dev/null || log ERROR "Failed to unmount $DEC_PATH"; } || log INFO "$DEC_PATH not mounted, skipping unmount"
   [ "$PASS_FILE" = "/tmp/pass.tmp" ] && rm -f "$PASS_FILE" && log INFO "Removed temporary password file"
-  rm -f "$LIGHTTPD_CONFIG" /tmp/webdav.passwd && log INFO "Removed temporary lighttpd config and passwd"
+  rm -f "$LIGHTTPD_CONFIG" && log INFO "Removed temporary lighttpd config"
   log SUCCESS "Cleanup completed"
 }
 trap cleanup EXIT
@@ -35,7 +36,6 @@ ENC_PATH=${ENC_PATH:-/encrypted}
 DEC_PATH=${DEC_PATH:-/decrypted}
 TIMEOUT=${TIMEOUT:-7200}
 LIGHTTPD_CONFIG=${LIGHTTPD_CONFIG:-/tmp/lighttpd.conf}
-WEBDAV_USER=${WEBDAV_USER:-admin}
 WEBDAV_PORT=${WEBDAV_PORT:-6065}
 GOCRYPTFS_PASS_FILE=${GOCRYPTFS_PASS_FILE:-/run/secrets/gocryptfs_pass}
 
@@ -51,11 +51,9 @@ check "Failed to create directories or log file"
 if [ -f "$GOCRYPTFS_PASS_FILE" ]; then
   log INFO "Using password from file: $GOCRYPTFS_PASS_FILE"
   PASS_FILE="$GOCRYPTFS_PASS_FILE"
-  WEBDAV_PASS=$(cat "$PASS_FILE" | tr -d '\r\n:' | tr -dc 'A-Za-z0-9_-')
 elif [ -n "$PASSWD" ]; then
   log INFO "Using password from PASSWD env"
   PASS_FILE="/tmp/pass.tmp"
-  WEBDAV_PASS=$(echo "$PASSWD" | tr -d '\r\n:' | tr -dc 'A-Za-z0-9_-')
   echo "$PASSWD" > "$PASS_FILE"
   chmod 600 "$PASS_FILE"; check "Failed to set permissions for $PASS_FILE"
 else
@@ -63,25 +61,14 @@ else
   exit 1
 fi
 
-# Kiểm tra password hợp lệ
-[ -n "$WEBDAV_PASS" ] || { log ERROR "Password is empty after cleaning"; exit 1; }
-
-# Tạo lighttpd.conf
+# Tạo lighttpd.conf (không auth)
 log INFO "Generating lighttpd config at $LIGHTTPD_CONFIG"
-echo "$WEBDAV_USER:$WEBDAV_PASS" > /tmp/webdav.passwd
 cat > "$LIGHTTPD_CONFIG" <<EOF
 server.document-root = "$DEC_PATH"
 server.port = $WEBDAV_PORT
-server.modules = ( "mod_webdav", "mod_auth", "mod_authn_file" )
+server.modules = ( "mod_webdav" )
 webdav.activate = "enable"
 webdav.is-readonly = "disable"
-auth.backend = "plain"
-auth.backend.plain.userfile = "/tmp/webdav.passwd"
-auth.require = ( "/" => (
-  "method" => "basic",
-  "realm" => "WebDAV",
-  "require" => "valid-user"
-))
 EOF
 check "Failed to create $LIGHTTPD_CONFIG"
 
@@ -115,12 +102,16 @@ log SUCCESS "Mounted $DEC_PATH"
 log INFO "Checking if port $WEBDAV_PORT is available"
 netstat -tuln | grep ":$WEBDAV_PORT " && { log ERROR "Port $WEBDAV_PORT is already in use"; exit 1; }
 
+# Debug lighttpd modules and version
+log INFO "Lighttpd modules:" && ls /usr/lib/lighttpd
+log INFO "Lighttpd version:" && lighttpd -v
+
 # Start lighttpd
 log INFO "Starting lighttpd on port $WEBDAV_PORT"
-lighttpd -f "$LIGHTTPD_CONFIG" >> /var/log/lighttpd.log 2>&1 &
+lighttpd -D -f "$LIGHTTPD_CONFIG" 2>&1 | tee -a /var/log/lighttpd.log &
 PID_LIGHTTPD=$!
-sleep 5
-kill -0 "$PID_LIGHTTPD" 2>/dev/null || { log ERROR "Failed to start lighttpd"; cat /var/log/lighttpd.log >&2; cat "$LIGHTTPD_CONFIG" >&2; cat /tmp/webdav.passwd >&2; ls -ld "$DEC_PATH" >&2; exit 1; }
+sleep 100
+kill -0 "$PID_LIGHTTPD" 2>/dev/null || { log ERROR "Failed to start lighttpd"; cat /var/log/lighttpd.log >&2; cat "$LIGHTTPD_CONFIG" >&2; ls -ld "$DEC_PATH" >&2; ls /usr/lib/lighttpd >&2; lighttpd -v >&2; exit 1; }
 log SUCCESS "lighttpd started (PID: $PID_LIGHTTPD)"
 
 # Wait for timeout or run indefinitely
