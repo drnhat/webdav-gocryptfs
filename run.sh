@@ -7,7 +7,16 @@ export TZ
 
 # Hàm log và kiểm tra lỗi
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1: $2"; }
-check() { [ $? -eq 0 ] || { log ERROR "$1"; cat /var/log/lighttpd.log >&2; exit 1; }; }
+check() {
+  [ $? -eq 0 ] || {
+    log ERROR "$1"
+    [ -f /var/log/lighttpd.log ] && log ERROR "lighttpd log:" && cat /var/log/lighttpd.log >&2
+    [ -f "$LIGHTTPD_CONFIG" ] && log ERROR "lighttpd config:" && cat "$LIGHTTPD_CONFIG" >&2
+    [ -f /tmp/webdav.passwd ] && log ERROR "webdav passwd:" && cat /tmp/webdav.passwd >&2
+    log ERROR "Directory permissions:" && ls -ld "$DEC_PATH" >&2
+    exit 1
+  }
+}
 
 # Cleanup khi container dừng
 cleanup() {
@@ -30,25 +39,32 @@ WEBDAV_USER=${WEBDAV_USER:-admin}
 WEBDAV_PORT=${WEBDAV_PORT:-6065}
 GOCRYPTFS_PASS_FILE=${GOCRYPTFS_PASS_FILE:-/run/secrets/gocryptfs_pass}
 
-# Tạo thư mục
+# Tạo thư mục và log file
 log INFO "Creating directories: $ENC_PATH, $DEC_PATH"
-mkdir -p "$ENC_PATH" "$DEC_PATH"; check "Failed to create directories"
+mkdir -p "$ENC_PATH" "$DEC_PATH" /var/log
+touch /var/log/lighttpd.log
+chown lighttpd:lighttpd /var/log/lighttpd.log
+chmod 644 /var/log/lighttpd.log
+check "Failed to create directories or log file"
 
 # Load password
 if [ -f "$GOCRYPTFS_PASS_FILE" ]; then
   log INFO "Using password from file: $GOCRYPTFS_PASS_FILE"
   PASS_FILE="$GOCRYPTFS_PASS_FILE"
-  WEBDAV_PASS=$(cat "$PASS_FILE")
+  WEBDAV_PASS=$(cat "$PASS_FILE" | tr -d '\r\n:' | tr -dc 'A-Za-z0-9_-')
 elif [ -n "$PASSWD" ]; then
   log INFO "Using password from PASSWD env"
   PASS_FILE="/tmp/pass.tmp"
-  WEBDAV_PASS="$PASSWD"
+  WEBDAV_PASS=$(echo "$PASSWD" | tr -d '\r\n:' | tr -dc 'A-Za-z0-9_-')
   echo "$PASSWD" > "$PASS_FILE"
   chmod 600 "$PASS_FILE"; check "Failed to set permissions for $PASS_FILE"
 else
   log ERROR "No password found (neither $GOCRYPTFS_PASS_FILE nor PASSWD)"
   exit 1
 fi
+
+# Kiểm tra password hợp lệ
+[ -n "$WEBDAV_PASS" ] || { log ERROR "Password is empty after cleaning"; exit 1; }
 
 # Tạo lighttpd.conf
 log INFO "Generating lighttpd config at $LIGHTTPD_CONFIG"
@@ -92,6 +108,7 @@ gocryptfs -nosyslog -allow_other --passfile "$PASS_FILE" "$ENC_PATH" "$DEC_PATH"
 PID_FUSE=$!
 sleep 1
 mountpoint -q "$DEC_PATH"; check "Failed to mount $DEC_PATH"
+chown lighttpd:lighttpd "$DEC_PATH"; chmod 755 "$DEC_PATH"; check "Failed to set permissions for $DEC_PATH"
 log SUCCESS "Mounted $DEC_PATH"
 
 # Kiểm tra port
@@ -102,8 +119,8 @@ netstat -tuln | grep ":$WEBDAV_PORT " && { log ERROR "Port $WEBDAV_PORT is alrea
 log INFO "Starting lighttpd on port $WEBDAV_PORT"
 lighttpd -f "$LIGHTTPD_CONFIG" >> /var/log/lighttpd.log 2>&1 &
 PID_LIGHTTPD=$!
-sleep 2
-kill -0 "$PID_LIGHTTPD" 2>/dev/null || { log ERROR "Failed to start lighttpd"; cat /var/log/lighttpd.log >&2; exit 1; }
+sleep 5
+kill -0 "$PID_LIGHTTPD" 2>/dev/null || { log ERROR "Failed to start lighttpd"; cat /var/log/lighttpd.log >&2; cat "$LIGHTTPD_CONFIG" >&2; cat /tmp/webdav.passwd >&2; ls -ld "$DEC_PATH" >&2; exit 1; }
 log SUCCESS "lighttpd started (PID: $PID_LIGHTTPD)"
 
 # Wait for timeout or run indefinitely
