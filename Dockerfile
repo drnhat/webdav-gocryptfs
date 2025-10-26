@@ -1,13 +1,12 @@
 FROM alpine:edge
 
 # Dependencies
-RUN apk add --no-cache fuse tzdata gocryptfs
+RUN apk add --no-cache fuse tzdata gocryptfs lighttpd lighttpd-mod_webdav lighttpd-mod_auth
 
-# Copy webdav binary
-COPY webdav /usr/local/bin/webdav
+# Copy script
 COPY run.sh /run.sh
 
-RUN chmod +x /usr/local/bin/webdav /run.sh
+RUN chmod +x /run.sh
 
 EXPOSE 6065
 ENTRYPOINT ["/run.sh"]

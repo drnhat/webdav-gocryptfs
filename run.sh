@@ -7,15 +7,26 @@ export TZ
 
 # Hàm log và kiểm tra lỗi
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1: $2"; }
-check() { [ $? -eq 0 ] || { log ERROR "$1"; exit 1; }; }
+check() { [ $? -eq 0 ] || { log ERROR "$1"; cat /var/log/lighttpd.log >&2; exit 1; }; }
+
+# Cleanup khi container dừng
+cleanup() {
+  log INFO "Cleaning up..."
+  [ -n "$PID_LIGHTTPD" ] && kill -0 "$PID_LIGHTTPD" 2>/dev/null && { log INFO "Stopping lighttpd (PID: $PID_LIGHTTPD)"; kill "$PID_LIGHTTPD" || log ERROR "Failed to kill lighttpd"; }
+  [ -n "$PID_FUSE" ] && kill -0 "$PID_FUSE" 2>/dev/null && { log INFO "Stopping gocryptfs (PID: $PID_FUSE)"; kill "$PID_FUSE" || log ERROR "Failed to kill gocryptfs"; }
+  mountpoint -q "$DEC_PATH" && { log INFO "Unmounting $DEC_PATH"; fusermount -u "$DEC_PATH" 2>/dev/null || umount "$DEC_PATH" 2>/dev/null || log ERROR "Failed to unmount $DEC_PATH"; } || log INFO "$DEC_PATH not mounted, skipping unmount"
+  [ "$PASS_FILE" = "/tmp/pass.tmp" ] && rm -f "$PASS_FILE" && log INFO "Removed temporary password file"
+  rm -f "$LIGHTTPD_CONFIG" /tmp/webdav.passwd && log INFO "Removed temporary lighttpd config and passwd"
+  log SUCCESS "Cleanup completed"
+}
+trap cleanup EXIT
 
 # Biến môi trường
 ENC_PATH=${ENC_PATH:-/encrypted}
 DEC_PATH=${DEC_PATH:-/decrypted}
 TIMEOUT=${TIMEOUT:-7200}
-WEBDAV_CONFIG=${WEBDAV_CONFIG:-/tmp/webdav.yml}
+LIGHTTPD_CONFIG=${LIGHTTPD_CONFIG:-/tmp/lighttpd.conf}
 WEBDAV_USER=${WEBDAV_USER:-admin}
-WEBDAV_PASS=${WEBDAV_PASS:-admin}
 WEBDAV_PORT=${WEBDAV_PORT:-6065}
 GOCRYPTFS_PASS_FILE=${GOCRYPTFS_PASS_FILE:-/run/secrets/gocryptfs_pass}
 
@@ -27,9 +38,11 @@ mkdir -p "$ENC_PATH" "$DEC_PATH"; check "Failed to create directories"
 if [ -f "$GOCRYPTFS_PASS_FILE" ]; then
   log INFO "Using password from file: $GOCRYPTFS_PASS_FILE"
   PASS_FILE="$GOCRYPTFS_PASS_FILE"
+  WEBDAV_PASS=$(cat "$PASS_FILE")
 elif [ -n "$PASSWD" ]; then
   log INFO "Using password from PASSWD env"
   PASS_FILE="/tmp/pass.tmp"
+  WEBDAV_PASS="$PASSWD"
   echo "$PASSWD" > "$PASS_FILE"
   chmod 600 "$PASS_FILE"; check "Failed to set permissions for $PASS_FILE"
 else
@@ -37,18 +50,29 @@ else
   exit 1
 fi
 
-# Tạo webdav.yml
-log INFO "Generating WebDAV config at $WEBDAV_CONFIG"
-cat > "$WEBDAV_CONFIG" <<EOF
-address: 0.0.0.0
-port: $WEBDAV_PORT
-directory: $DEC_PATH
-users:
-  - username: $WEBDAV_USER
-    password: $WEBDAV_PASS
-    permissions: CRUD
+# Tạo lighttpd.conf
+log INFO "Generating lighttpd config at $LIGHTTPD_CONFIG"
+echo "$WEBDAV_USER:$WEBDAV_PASS" > /tmp/webdav.passwd
+cat > "$LIGHTTPD_CONFIG" <<EOF
+server.document-root = "$DEC_PATH"
+server.port = $WEBDAV_PORT
+server.modules = ( "mod_webdav", "mod_auth", "mod_authn_file" )
+webdav.activate = "enable"
+webdav.is-readonly = "disable"
+auth.backend = "plain"
+auth.backend.plain.userfile = "/tmp/webdav.passwd"
+auth.require = ( "/" => (
+  "method" => "basic",
+  "realm" => "WebDAV",
+  "require" => "valid-user"
+))
 EOF
-check "Failed to create $WEBDAV_CONFIG"
+check "Failed to create $LIGHTTPD_CONFIG"
+
+# Test lighttpd config
+log INFO "Testing lighttpd config"
+lighttpd -t -f "$LIGHTTPD_CONFIG" >> /var/log/lighttpd.log 2>&1
+check "Failed to test lighttpd config"
 
 # Init gocryptfs
 if [ ! -f "${ENC_PATH}/gocryptfs.conf" ]; then
@@ -70,23 +94,23 @@ sleep 1
 mountpoint -q "$DEC_PATH"; check "Failed to mount $DEC_PATH"
 log SUCCESS "Mounted $DEC_PATH"
 
-# Start webdav
-log INFO "Starting WebDAV server on port $WEBDAV_PORT"
-webdav --config "$WEBDAV_CONFIG" >> /var/log/webdav.log 2>&1 &
-PID_WEBDAV=$!
-sleep 1
-kill -0 "$PID_WEBDAV" 2>/dev/null; check "Failed to start WebDAV server"
-log SUCCESS "WebDAV server started (PID: $PID_WEBDAV)"
+# Kiểm tra port
+log INFO "Checking if port $WEBDAV_PORT is available"
+netstat -tuln | grep ":$WEBDAV_PORT " && { log ERROR "Port $WEBDAV_PORT is already in use"; exit 1; }
 
-# Wait for timeout
-log INFO "Waiting for $TIMEOUT seconds"
-sleep "$TIMEOUT"
+# Start lighttpd
+log INFO "Starting lighttpd on port $WEBDAV_PORT"
+lighttpd -f "$LIGHTTPD_CONFIG" >> /var/log/lighttpd.log 2>&1 &
+PID_LIGHTTPD=$!
+sleep 2
+kill -0 "$PID_LIGHTTPD" 2>/dev/null || { log ERROR "Failed to start lighttpd"; cat /var/log/lighttpd.log >&2; exit 1; }
+log SUCCESS "lighttpd started (PID: $PID_LIGHTTPD)"
 
-# Cleanup
-log INFO "Cleaning up..."
-[ -n "$PID_WEBDAV" ] && kill -0 "$PID_WEBDAV" 2>/dev/null && { log INFO "Stopping WebDAV (PID: $PID_WEBDAV)"; kill "$PID_WEBDAV" || log ERROR "Failed to kill WebDAV"; }
-[ -n "$PID_FUSE" ] && kill -0 "$PID_FUSE" 2>/dev/null && { log INFO "Stopping gocryptfs (PID: $PID_FUSE)"; kill "$PID_FUSE" || log ERROR "Failed to kill gocryptfs"; }
-mountpoint -q "$DEC_PATH" && { log INFO "Unmounting $DEC_PATH"; fusermount -u "$DEC_PATH" 2>/dev/null || umount "$DEC_PATH" 2>/dev/null || log ERROR "Failed to unmount $DEC_PATH"; } || log INFO "$DEC_PATH not mounted, skipping unmount"
-[ "$PASS_FILE" = "/tmp/pass.tmp" ] && rm -f "$PASS_FILE" && log INFO "Removed temporary password file"
-rm -f "$WEBDAV_CONFIG" && log INFO "Removed temporary WebDAV config"
-log SUCCESS "Cleanup completed"
+# Wait for timeout or run indefinitely
+if [ "$TIMEOUT" -eq 0 ]; then
+  log INFO "Running indefinitely until stopped"
+  while true; do sleep 3600; done
+else
+  log INFO "Waiting for $TIMEOUT seconds"
+  sleep "$TIMEOUT"
+fi
