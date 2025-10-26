@@ -1,5 +1,4 @@
-FROM alpine:edge
-
+FROM alpine:3.20
 # Dependencies
 RUN apk add --no-cache fuse tzdata gocryptfs lighttpd lighttpd-mod_webdav lighttpd-mod_auth
 
