@@ -76,6 +76,7 @@ Ghi chú:
 - Nếu không muốn chạy FUSE trong container: mount encrypted repository trên host bằng gocryptfs rồi mount thư mục plaintext vào container (xem phần "Chạy gocryptfs trên host").
 
 ## Ví dụ docker-compose
+```
 version: "3.7"
 services:
   webdav:
@@ -99,7 +100,7 @@ services:
       WEBDAV_PORT: 6065
       TIMEOUT: 0
     restart: unless-stopped
-
+```
 ## Sử dụng gocryptfs trên host thay vì trong container (an toàn hơn)
 1. Cài gocryptfs trên host (ví dụ apt install gocryptfs).
 2. Tạo và mount:
