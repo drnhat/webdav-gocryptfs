@@ -6,8 +6,9 @@ name: Docker
 # documentation.
 
 on:
-  schedule:
-    - cron: '36 22 * * *'
+  workflow_dispatch: # <-- Thêm dòng này để chạy thủ công từ giao diện Actions
+ # schedule:
+ #   - cron: '36 22 * * *'
   push:
     branches: [ "main" ]
     # Publish semver tags as releases.
