@@ -130,7 +130,7 @@ server.document-root = "$DEC_PATH"
 server.port = $WEBDAV_PORT
 server.username = "lighttpd"
 server.groupname = "lighttpd"
-server.errorlog = "/dev/stderr"
+server.errorlog = ""
 
 # File lớn (video...): stream trực tiếp, không buffer cả file vào /tmp
 server.stream-request-body = 2
